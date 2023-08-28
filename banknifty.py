@@ -1,13 +1,12 @@
 import json
 from datetime import datetime, timedelta
-from pytz import timezone
 from time import sleep
-import pandas as pd
-import dash
 import os
 import csv
-# from telegram import Bot  # Import the Bot class from the telegram module
-# from telegram.error import TelegramError
+from pytz import timezone
+import pandas as pd
+import dash
+
 from dash import dcc
 from dash import html
 from dash.dependencies import Output, Input, State
@@ -188,27 +187,31 @@ def calculate_heikin_ashi(data):
 
             consecutive_green_candles += 1
             prev_yes_open = ha_data['open'].iloc[i]  # Update previous "YES" open value
+            prev_yes_index = i  # Store index of the previous "YES" candle
 
             if consecutive_green_candles == 1:
                 ha_data.at[ha_data.index[i], 'mark'] = 'YES'
                 label_data.append(('YES', ha_data.index[i], ha_data['open'].iloc[i], None))
-               # send_telegram_message(bot_token, chat_id, f"🟢 **YES**: Candle at {ha_data.index[i]}")
+               
             else:
                 ha_data.at[ha_data.index[i], 'mark'] = ''
 
         elif (ha_data['close'].iloc[i - 1] > ha_data['open'].iloc[i - 1] and
             ha_data['close'].iloc[i] < ha_data['open'].iloc[i]):
 
-            # Check if the previous candle was green
-            if consecutive_green_candles > 0:
+            # Check if the previous candles were green
+            if consecutive_green_candles >= 2:
                 ha_data.at[ha_data.index[i], 'mark'] = 'NO'
                 if prev_yes_open is not None:
                     if no_confirmed:  # Calculate difference only if "NO" is confirmed
                         confirmed_no_closing = ha_data['close'].iloc[i]  # Store confirmed "NO" closing value
                         diff = prev_yes_open - confirmed_no_closing  # Corrected difference calculation
-                        label_data.append(('NO', ha_data.index[i], confirmed_no_closing, diff))
-                       # send_telegram_message(bot_token, chat_id, f"🔴 **NO**: Candle at {ha_data.index[i]}")
-
+                        
+                        # Check if the chart went 5 points above from the previous YES open
+                        if ha_data['open'].iloc[i] >= (prev_yes_open + 5):
+                            label_data.append(('NO', ha_data.index[i], confirmed_no_closing, diff))
+                        else:
+                            print("Chart did not go 5 points above, skipping NO label")
                     else:
                         ha_data.at[ha_data.index[i], 'mark'] = ''
                         print("Warning: NO not confirmed yet, skipping difference calculation")
@@ -217,7 +220,11 @@ def calculate_heikin_ashi(data):
                     print("Warning: prev_yes_open is None, skipping difference calculation")
        
                 no_confirmed = True  # "NO" is confirmed
+                label_data.append(('NO', ha_data.index[i], ha_data['close'].iloc[i], None))
                 consecutive_green_candles = 0  # Reset consecutive_green_candles
+
+            elif consecutive_green_candles == 1:
+                consecutive_green_candles = 0  # Reset consecutive_green_candles if only one green candle
 
     # Calculate the difference and add it to the DataFrame
     ha_data['Difference'] = ha_data['open'] - ha_data['close']
@@ -618,13 +625,15 @@ external_stylesheets = [
         "rel": "stylesheet",
     },
 ]
+
+client = MongoClient(MONGO_CONNECTION_STRING)
+db = client[DB_NAME]
+collection = db[COLLECTION_NAME]
 # Initialize Dash app
 app = dash.Dash(__name__, suppress_callback_exceptions=True, external_stylesheets= external_stylesheets)
 
 # MongoDB setup
-client = MongoClient(MONGO_CONNECTION_STRING)
-db = client[DB_NAME]
-collection = db[COLLECTION_NAME]
+
 
 app.layout = html.Div([
     dcc.Interval(id='graph-update-interval', interval=5000, n_intervals=0),
@@ -637,74 +646,16 @@ app.layout = html.Div([
 ])
 
 # Define the callback to display the appropriate page content based on the URL pathname
-@app.callback(Output('page-content', 'children'),
+@app.callback(Output('tabs-content', 'children'),
               Input('url', 'pathname'))
 def display_page(pathname):
     if pathname == '/page-2':
-        # Fetch data from MongoDB
-        data = collection.find({}, {'_id': 0}).sort('timestamp')
-        df = pd.DataFrame(data)
-
-        # Convert 'timestamp' column to datetime and set it as the index
-        df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%d %H:%M:%S.%f')
-        df.set_index('timestamp', inplace=True)
-
-        # Create and return the content for the second page (Market Depth Table)
-        return html.Div([
-            html.H3('Market Depth Table'),
-            dash_table.DataTable(
-                id='data-table',
-                columns=[{'name': col, 'id': col} for col in df.columns],
-                data=df.to_dict('records'),
-                style_table={'height': '1000px', 'overflowY': 'auto'}
-            ),
-            dcc.Interval(id='table-update-interval', interval=1000, n_intervals=0)
-        ])
+        return generate_page_2_content()
     else:
-        # Default to the first page (Candlestick Chart)
-        return html.Div([
-            dcc.Graph(id='live-candlestick-graph', config={'displayModeBar': True, 'scrollZoom': True}),
-            
-            dcc.Dropdown(
-                id='chart-type-dropdown',
-                options=[
-                    {'label': 'Normal', 'value': 'normal'},
-                    {'label': 'Heikin Ashi', 'value': 'heikin_ashi'},
-                ],
-                value='normal',
-                clearable=False,
-                style={'width': '150px'}
-            ),
-            dcc.Dropdown(
-                id='interval-dropdown',
-                options=[
-                    {'label': '1 Min', 'value': 1},
-                    {'label': '3 Min', 'value': 3},
-                    {'label': '5 Min', 'value': 5},
-                    {'label': '10 Min', 'value': 10},
-                    {'label': '30 Min', 'value': 30},
-                    {'label': '60 Min', 'value': 60},
-                    {'label': '1 Day', 'value': 1440}
-                ],
-                value=1,
-                clearable=False,
-                style={'width': '150px'}
-            ),
-            dcc.Interval(id='graph-update-interval', interval=2000, n_intervals=0),
-            html.Button('Show/Hide Trend Lines', id='toggle-trend-lines-button', n_clicks=0),
-        ], style={'height': '100vh', 'width': '100vw'})
-
-app.layout = html.Div([
-    dcc.Location(id='url', refresh=False),
-    html.Div([
-        html.H2(["BullsEdges"], className='header-title'),
-        html.Nav([
-            dcc.Link('Candlestick Chart', href='/', className='nav-link'),
-            dcc.Link('Market Depth Table', href='/page-2', className='nav-link'),
-            # Add more navigation links as needed
-        ], className='nav'),
-    ], className='header'),
-    html.Div([
+        return generate_page_1_content()
+    
+def generate_page_1_content():
+    return html.Div([
         html.Div([
             dcc.Graph(id='live-candlestick-graph', config={'displayModeBar': True, 'scrollZoom': True}),
             
@@ -743,7 +694,106 @@ app.layout = html.Div([
             dcc.Interval(id='graph-update-interval', interval=2000, n_intervals=0),
             html.Button('Show/Hide Trend Lines', id='toggle-trend-lines-button', n_clicks=0),
         ], className='content-section'),
-    ], className='content'),
+    ], className='content')
+
+def generate_page_2_content():
+    # Fetch data from MongoDB
+    client = MongoClient(MONGO_CONNECTION_STRING)
+    db = client[DB_NAME]
+    collection = db[COLLECTION_NAME]
+    data = collection.find({}, {'_id': 0}).sort('timestamp')
+    df = pd.DataFrame(data)
+    # Convert and process data as needed
+    
+    return  html.Div([
+            html.H3('Market Depth Table'),
+            dash_table.DataTable(
+                id='data-table',
+                columns=[{'name': col, 'id': col} for col in df.columns],
+                data=df.to_dict('records'),
+                style_table={'height': '1000px', 'overflowY': 'auto'}
+            ),
+            dcc.Interval(id='table-update-interval', interval=1000, n_intervals=0)
+        ])
+
+
+# def display_page(pathname):
+#     if pathname == '/page-2':
+#         # Fetch data from MongoDB
+#         data = collection.find({}, {'_id': 0}).sort('timestamp')
+#         df = pd.DataFrame(data)
+
+#         # Convert 'timestamp' column to datetime and set it as the index
+#         df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%d %H:%M:%S.%f')
+#         df.set_index('timestamp', inplace=True)
+
+#         # Create and return the content for the second page (Market Depth Table)
+#         return html.Div([
+#             html.H3('Market Depth Table'),
+#             dash_table.DataTable(
+#                 id='data-table',
+#                 columns=[{'name': col, 'id': col} for col in df.columns],
+#                 data=df.to_dict('records'),
+#                 style_table={'height': '1000px', 'overflowY': 'auto'}
+#             ),
+#             dcc.Interval(id='table-update-interval', interval=1000, n_intervals=0)
+#         ])
+#     else:
+#         # Default to the first page (Candlestick Chart)
+#         return html.Div([
+#         html.Div([
+#             dcc.Graph(id='live-candlestick-graph', config={'displayModeBar': True, 'scrollZoom': True}),
+            
+#             html.Div([
+#                 html.Label('Chart Type:', className='dropdown-label'),
+#                 dcc.Dropdown(
+#                     id='chart-type-dropdown',
+#                     options=[
+#                         {'label': 'Normal', 'value': 'normal'},
+#                         {'label': 'Heikin Ashi', 'value': 'heikin_ashi'},
+#                     ],
+#                     value='normal',
+#                     clearable=False,
+#                     className='dropdown'
+#                 ),
+#             ], className='dropdown-container'),
+            
+#             html.Div([
+#                 html.Label('Interval:', className='dropdown-label'),
+#                 dcc.Dropdown(
+#                     id='interval-dropdown',
+#                     options=[
+#                         {'label': '1 Min', 'value': 1},
+#                         {'label': '3 Min', 'value': 3},
+#                         {'label': '5 Min', 'value': 5},
+#                         {'label': '10 Min', 'value': 10},
+#                         {'label': '30 Min', 'value': 30},
+#                         {'label': '60 Min', 'value': 60},
+#                         {'label': '1 Day', 'value': 1440}
+#                     ],
+#                     value=1,
+#                     clearable=False,
+#                     className='dropdown'
+#                 ),
+#             ], className='dropdown-container'),
+#             dcc.Interval(id='graph-update-interval', interval=2000, n_intervals=0),
+#             html.Button('Show/Hide Trend Lines', id='toggle-trend-lines-button', n_clicks=0),
+#         ], className='content-section'),
+#     ], className='content')
+
+app.layout = html.Div([
+    dcc.Location(id='url', refresh=False),
+    html.Div([
+        html.H2(["BullsEdges"], className='header-title'),
+        html.Nav([
+            dcc.Link('Candlestick Chart', href='/', className='nav-link'),
+            dcc.Link('Market Depth Table', href='/page-2', className='nav-link'),
+            # Add more navigation links as needed
+        ], className='nav'),
+    ], className='header'),
+    
+    html.Div(id='tabs-content'),
+    
     html.Div([
         html.P("Your Footer Information", style={'textAlign': 'center'}),
     ], className='footer'),
